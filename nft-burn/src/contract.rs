@@ -459,13 +459,15 @@ fn get_estimated_rewards(
     let mut token_rank = None;
 
     if state.reward_contract.burn_type == "rank" {
-        let rank: Uint128 = RANK_STORE
-            .get(deps.storage, &token_id)
-            .ok_or_else(|| StdError::generic_err("Rank pool doesn't have token"))?;
-        token_rank = Some(rank);
-        if state.reward_contract.burn_rank_bonus_start.unwrap() > rank {
-            let reward = state.reward_contract.burn_rank_bonus_start.unwrap() - rank;
-            rank_reward = Uint128::from(reward);
+        let rank: Option<Uint128> = RANK_STORE
+            .get(deps.storage, &token_id);
+            //.ok_or_else(|| StdError::generic_err("Rank pool doesn't have token"))?;
+        if(rank.is_some()){
+        token_rank = rank;
+            if state.reward_contract.burn_rank_bonus_start.unwrap() > rank.unwrap() {
+                let reward = state.reward_contract.burn_rank_bonus_start.unwrap() - rank.unwrap();
+                rank_reward = Uint128::from(reward);
+            }
         }
     }
 
@@ -499,14 +501,16 @@ fn get_estimated_rewards_mut(
     let mut rank_reward = Uint128::from(0u128);
     let mut token_rank = None;
 
-    if state.reward_contract.burn_type == "rank" {
-        let rank: Uint128 = RANK_STORE
-            .get(deps.storage, &token_id)
-            .ok_or_else(|| StdError::generic_err("Rank pool doesn't have token"))?;
-        token_rank = Some(rank);
-        if state.reward_contract.burn_rank_bonus_start.unwrap() > rank {
-            let reward = state.reward_contract.burn_rank_bonus_start.unwrap() - rank;
-            rank_reward = Uint128::from(reward);
+   if state.reward_contract.burn_type == "rank" {
+        let rank: Option<Uint128> = RANK_STORE
+            .get(deps.storage, &token_id);
+            //.ok_or_else(|| StdError::generic_err("Rank pool doesn't have token"))?;
+        if(rank.is_some()){
+        token_rank = rank;
+            if state.reward_contract.burn_rank_bonus_start.unwrap() > rank.unwrap() {
+                let reward = state.reward_contract.burn_rank_bonus_start.unwrap() - rank.unwrap();
+                rank_reward = Uint128::from(reward);
+            }
         }
     }
 
