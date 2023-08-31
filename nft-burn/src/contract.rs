@@ -1,7 +1,8 @@
 use crate::error::ContractError;
 use crate::msg::{
     BurnInfoResponse, ExecuteMsg, ExpectedReward, ExpectedRewardResponse, HandleNftReceiveMsg,
-    HandleReceiveMsg, History, HistoryFull, InstantiateMsg, QueryMsg, RewardsContractInfo,
+    HandleReceiveMsg, History, HistoryFull, InstantiateMsg, QueryMsg, Rank, Reward,
+    RewardsContractInfo,
 };
 use crate::rand::sha_256;
 use crate::state::{
@@ -9,19 +10,21 @@ use crate::state::{
     PREFIX_REVOKED_PERMITS, RANK_STORE,
 };
 use cosmwasm_std::{
-    entry_point, from_binary, to_binary, Addr, Binary, CanonicalAddr, CosmosMsg, Deps,
+    entry_point, from_binary, to_binary, Addr, Binary, CanonicalAddr, CosmosMsg, Decimal, Deps,
     DepsMut, Env, MessageInfo, Response, StdError, StdResult, Uint128,
 };
 use secret_toolkit::{
     permit::{validate, Permit, RevokedPermits},
     snip20::{balance_query, set_viewing_key_msg, transfer_msg, Balance},
     snip721::{
-        batch_burn_nft_msg, nft_dossier_query, register_receive_nft_msg, Burn, NftDossier, ViewerInfo,
+        batch_burn_nft_msg, nft_dossier_query, register_receive_nft_msg, Burn, NftDossier,
+        ViewerInfo,
     },
 };
 
 pub const BLOCK_SIZE: usize = 256;
 ///  Add function to get balance
+/// Add message to burn
 
 #[entry_point]
 pub fn instantiate(
@@ -38,9 +41,8 @@ pub fn instantiate(
         viewing_key: Some(viewing_key),
         owner: info.sender.clone(),
         nft_contract: msg.nft_contract,
-        reward_contract: msg.reward_contract,
+        reward_contracts: msg.reward_contracts,
         total_burned_amount: 0,
-        total_rewards: Uint128::from(0u128),
         is_active: true,
         trait_restriction: msg.trait_restriction,
         burn_counter_date: _env.block.time.seconds(),
@@ -49,7 +51,7 @@ pub fn instantiate(
     //Save Contract state
     CONFIG_ITEM.save(deps.storage, &state)?;
     for rank in msg.ranks.iter() {
-        RANK_STORE.insert(deps.storage, &rank.token_id, &rank.rank)?;
+        RANK_STORE.insert(deps.storage, &rank.token_id, &rank)?;
     }
 
     let mut response_msgs: Vec<CosmosMsg> = Vec::new();
@@ -76,13 +78,15 @@ pub fn instantiate(
         state.nft_contract.address.to_string(),
     )?);
 
-    response_msgs.push(set_viewing_key_msg(
-        vk.to_string(),
-        None,
-        BLOCK_SIZE,
-        state.reward_contract.code_hash.to_string(),
-        state.reward_contract.address.to_string(),
-    )?);
+    for reward_contract in state.reward_contracts.iter() {
+        response_msgs.push(set_viewing_key_msg(
+            vk.to_string(),
+            None,
+            BLOCK_SIZE,
+            reward_contract.code_hash.to_string(),
+            reward_contract.address.to_string(),
+        )?);
+    }
 
     Ok(Response::new().add_messages(response_msgs))
 }
@@ -98,8 +102,8 @@ pub fn execute(
         ExecuteMsg::RevokePermit { permit_name } => {
             try_revoke_permit(deps, &info.sender, &permit_name)
         }
-        ExecuteMsg::UpdateRewardContract { contract } => {
-            try_update_reward_contract(deps, &info.sender, contract)
+        ExecuteMsg::UpdateRewardContract { contracts } => {
+            try_update_reward_contract(deps, &info.sender, contracts)
         }
         ExecuteMsg::RemoveRewards {} => try_remove_rewards(deps, &info.sender),
         ExecuteMsg::BatchReceiveNft {
@@ -134,17 +138,22 @@ fn receive(
     deps.api.debug(&format!("Receive received"));
     let response_msgs: Vec<CosmosMsg> = Vec::new();
     let mut state = CONFIG_ITEM.load(deps.storage)?;
-
     if let Some(bin_msg) = msg {
         match from_binary(&bin_msg)? {
             HandleReceiveMsg::ReceiveRewards {} => {
-                if info_sender != &state.reward_contract.address {
+                let reward_contract_index = state
+                    .reward_contracts
+                    .iter()
+                    .position(|x| x.address == info_sender.to_string());
+
+                if reward_contract_index.is_none() {
                     return Err(ContractError::CustomError {
                         val: info_sender.to_string()
                             + &" Address is not correct reward snip contract".to_string(),
                     });
                 }
-                state.total_rewards += amount;
+                let reward_contract = &mut state.reward_contracts[reward_contract_index.unwrap()];
+                reward_contract.total_rewards += amount;
 
                 CONFIG_ITEM.save(deps.storage, &state)?;
             }
@@ -183,107 +192,140 @@ fn try_batch_receive(
     if let Some(bin_msg) = msg {
         match from_binary(&bin_msg)? {
             HandleNftReceiveMsg::ClaimBurnRewards {
-                base_reward_expected,
-                bonus_expected,
+                expected_rewards,
+                message,
             } => {
                 let history_store = HISTORY_STORE.add_suffix(from.to_string().as_bytes());
                 let current_time = _env.block.time.seconds();
-                let mut rewards = Uint128::from(0u128);
-                let mut bonus_reward = Uint128::from(0u128);
-
+                let mut rewards_map = std::collections::HashMap::new();
+                for reward_contract in state.reward_contracts.iter() {
+                    let mut reward = {
+                        Reward {
+                            base_reward: Uint128::from(0u128),
+                            bonus_reward: Uint128::from(0u128),
+                        }
+                    };
+                    rewards_map.insert(reward_contract.name.to_string(), reward);
+                }
                 let mut index = 0;
                 for token_id in token_ids.iter() {
                     let response =
                         get_estimated_rewards_mut(&token_id, &current_time, &state, &deps).unwrap();
-                    if index == 0 {
-                        bonus_reward = response.bonus_expected;
+                    for res in response.iter() {
+                        if let Some(value) = rewards_map.get_mut(&res.reward_contract_name) {
+                            if index == 0 {
+                                value.bonus_reward = res.bonus_expected;
+                            }
+
+                            value.base_reward +=
+                                res.base_reward_expected + res.rank_reward_expected;
+
+                            let meta: NftDossier = nft_dossier_query(
+                                deps.querier,
+                                token_id.to_string(),
+                                None,
+                                None,
+                                BLOCK_SIZE,
+                                state.nft_contract.code_hash.clone(),
+                                state.nft_contract.address.to_string(),
+                            )?;
+                            if state.trait_restriction.is_some() {
+                                let trait_to_check = state.trait_restriction.as_ref().unwrap();
+                                let restricted_trait = meta
+                                    .public_metadata
+                                    .as_ref()
+                                    .unwrap()
+                                    .extension
+                                    .as_ref()
+                                    .unwrap()
+                                    .attributes
+                                    .as_ref()
+                                    .unwrap()
+                                    .iter()
+                                    .find(|&x| x.trait_type == Some(trait_to_check.to_string()));
+                                if restricted_trait.is_none() {
+                                    return Err(ContractError::CustomError {
+                                        val: "This NFT does not meet the requirements".to_string(),
+                                    });
+                                }
+                            }
+                            let history_rewards = if index == 0 {
+                                value.bonus_reward + value.base_reward
+                            } else {
+                                value.base_reward
+                            };
+                            let claim_history: History = {
+                                History {
+                                    token_id: token_id.to_string(),
+                                    date: current_time,
+                                    rewards: history_rewards,
+                                    message: message.to_string(),
+                                }
+                            };
+                            history_store.push(deps.storage, &claim_history)?;
+                            let full_history: HistoryFull = {
+                                HistoryFull {
+                                    date: current_time,
+                                    token_id: token_id.to_string(),
+                                    meta_data: meta.public_metadata.unwrap(),
+                                    message: message.to_string(),
+                                }
+                            };
+                            BURN_HISTORY_STORE.push(deps.storage, &full_history);
+                            state.total_burned_amount += 1;
+                            index = index + 1;
+                        }
                     }
+                }
 
-                    rewards += response.base_reward_expected + response.rank_reward_expected;
+                for expected_reward in expected_rewards.iter() {
+                    if let Some(value) = rewards_map.get_mut(&expected_reward.reward_contract_name)
+                    {
+                        if value.base_reward >= expected_reward.base_reward_expected
+                            && value.bonus_reward >= expected_reward.bonus_expected
+                        {
+                            let rewards_to_claim = value.base_reward + value.bonus_reward;
+                            let reward_contract_index =
+                                state.reward_contracts.iter().position(|x| {
+                                    x.address == expected_reward.reward_contract_name.to_string()
+                                });
+                            let reward_contract =
+                                &mut state.reward_contracts[reward_contract_index.unwrap()];
 
-                    let meta: NftDossier = nft_dossier_query(
-                        deps.querier,
-                        token_id.to_string(),
-                        None,
-                        None,
-                        BLOCK_SIZE,
-                        state.nft_contract.code_hash.clone(),
-                        state.nft_contract.address.to_string(),
-                    )?;
-                    if state.trait_restriction.is_some() {
-                        let trait_to_check = state.trait_restriction.as_ref().unwrap();
-                        let restricted_trait = meta
-                            .public_metadata
-                            .as_ref()
-                            .unwrap()
-                            .extension
-                            .as_ref()
-                            .unwrap()
-                            .attributes
-                            .as_ref()
-                            .unwrap()
-                            .iter()
-                            .find(|&x| x.trait_type == Some(trait_to_check.to_string()));
-                        if restricted_trait.is_none() {
+                            if rewards_to_claim < reward_contract.total_rewards {
+                                //claim rewards
+                                if value.bonus_reward > Uint128::from(0u128) {
+                                    state.burn_counter_date = current_time;
+                                }
+
+                                reward_contract.total_rewards -= rewards_to_claim;
+
+                                let cosmos_msg = transfer_msg(
+                                    from.to_string(),
+                                    rewards_to_claim,
+                                    None,
+                                    None,
+                                    BLOCK_SIZE,
+                                    reward_contract.code_hash.to_string(),
+                                    reward_contract.address.to_string(),
+                                )?;
+
+                                response_msgs.push(cosmos_msg);
+                            } else {
+                                return Err(ContractError::CustomError {
+                                    val: "Not enough rewards left".to_string(),
+                                });
+                            }
+                        } else {
                             return Err(ContractError::CustomError {
-                                val: "This NFT does not meet the requirements".to_string(),
+                                val: "Actual reward less than Expected reward".to_string(),
                             });
                         }
-                    }
-                    let history_rewards = if index == 0 {
-                        bonus_reward + rewards
-                    } else {
-                        rewards
-                    };
-                    let claim_history: History = {
-                        History {
-                            token_id: token_id.to_string(),
-                            date: current_time,
-                            rewards: history_rewards,
-                        }
-                    };
-                    history_store.push(deps.storage, &claim_history)?;
-                    let full_history: HistoryFull = {
-                        HistoryFull {
-                            date: current_time,
-                            token_id: token_id.to_string(),
-                            meta_data: meta.public_metadata.unwrap(),
-                        }
-                    };
-                    BURN_HISTORY_STORE.push(deps.storage, &full_history);
-                    state.total_burned_amount += 1;
-                    index = index + 1;
-                }
-                if rewards >= base_reward_expected && bonus_reward >= bonus_expected {
-                    let rewards_to_claim = rewards + bonus_reward;
-                    if rewards_to_claim < state.total_rewards {
-                        //claim rewards
-                        if bonus_reward > Uint128::from(0u128) {
-                            state.burn_counter_date = current_time;
-                        }
-
-                        state.total_rewards -= rewards_to_claim;
-
-                        let cosmos_msg = transfer_msg(
-                            from.to_string(),
-                            rewards_to_claim,
-                            None,
-                            None,
-                            BLOCK_SIZE,
-                            state.reward_contract.code_hash.to_string(),
-                            state.reward_contract.address.to_string(),
-                        )?;
-
-                        response_msgs.push(cosmos_msg);
                     } else {
                         return Err(ContractError::CustomError {
-                            val: "Not enough rewards left".to_string(),
+                            val: "Reward not in map".to_string(),
                         });
                     }
-                } else {
-                    return Err(ContractError::CustomError {
-                        val: "Actual reward less than Expected reward".to_string(),
-                    });
                 }
 
                 CONFIG_ITEM.save(deps.storage, &state)?;
@@ -331,9 +373,10 @@ fn try_revoke_permit(
 fn try_update_reward_contract(
     deps: DepsMut,
     sender: &Addr,
-    contract: RewardsContractInfo,
+    contracts: Vec<RewardsContractInfo>,
 ) -> Result<Response, ContractError> {
     let mut state = CONFIG_ITEM.load(deps.storage)?;
+    let mut response_msgs: Vec<CosmosMsg> = Vec::new();
 
     if sender.clone() != state.owner {
         return Err(ContractError::CustomError {
@@ -341,25 +384,31 @@ fn try_update_reward_contract(
         });
     }
 
-    if state.total_rewards != Uint128::from(0u128) {
-        return Err(ContractError::CustomError {
-            val: "Clear out rewards first before updating".to_string(),
-        });
+    for reward_contract in contracts.iter() {
+        if reward_contract.total_rewards != Uint128::from(0u128) {
+            return Err(ContractError::CustomError {
+                val: "Clear out rewards first before updating".to_string(),
+            });
+        }
+
+        response_msgs.push(set_viewing_key_msg(
+            state.viewing_key.clone().unwrap().to_string(),
+            None,
+            BLOCK_SIZE,
+            reward_contract.code_hash.to_string(),
+            reward_contract.address.to_string(),
+        )?);
     }
 
-    state.reward_contract = contract;
+    state.reward_contracts = contracts;
     CONFIG_ITEM.save(deps.storage, &state)?;
-    Ok(Response::new().add_message(set_viewing_key_msg(
-        state.viewing_key.unwrap().to_string(),
-        None,
-        BLOCK_SIZE,
-        state.reward_contract.code_hash,
-        state.reward_contract.address.to_string(),
-    )?))
+
+    Ok(Response::new().add_messages(response_msgs))
 }
 
 fn try_remove_rewards(deps: DepsMut, sender: &Addr) -> Result<Response, ContractError> {
     let mut state = CONFIG_ITEM.load(deps.storage)?;
+    let mut response_msgs: Vec<CosmosMsg> = Vec::new();
 
     if sender.clone() != state.owner {
         return Err(ContractError::CustomError {
@@ -367,19 +416,22 @@ fn try_remove_rewards(deps: DepsMut, sender: &Addr) -> Result<Response, Contract
         });
     }
 
-    let cosmos_msg = transfer_msg(
-        sender.to_string(),
-        state.total_rewards.clone(),
-        None,
-        None,
-        BLOCK_SIZE,
-        state.reward_contract.code_hash.to_string(),
-        state.reward_contract.address.to_string(),
-    )?;
+    for reward_contract in state.reward_contracts.iter_mut() {
+        let cosmos_msg = transfer_msg(
+            sender.to_string(),
+            reward_contract.total_rewards.clone(),
+            None,
+            None,
+            BLOCK_SIZE,
+            reward_contract.code_hash.to_string(),
+            reward_contract.address.to_string(),
+        )?;
+        response_msgs.push(cosmos_msg);
 
-    state.total_rewards = Uint128::from(0u128);
+        reward_contract.total_rewards = Uint128::from(0u128);
+    }
     CONFIG_ITEM.save(deps.storage, &state)?;
-    Ok(Response::new().add_message(cosmos_msg))
+    Ok(Response::new().add_messages(response_msgs))
 }
 
 pub fn try_set_viewing_key(
@@ -453,86 +505,91 @@ fn get_estimated_rewards(
     current_time: &u64,
     state: &State,
     deps: Deps,
-) -> StdResult<ExpectedReward> {
-    let mut bonus_reward = Uint128::from(0u128);
-    let mut rank_reward = Uint128::from(0u128);
-    let mut token_rank = None;
+) -> StdResult<Vec<ExpectedReward>> {
+    let mut expected_rewards: Vec<ExpectedReward> = Vec::new();
 
-    if state.reward_contract.burn_type == "rank" {
-        let rank: Option<Uint128> = RANK_STORE
-            .get(deps.storage, &token_id);
+    for reward_contract in state.reward_contracts.iter() {
+        let mut bonus_reward = Uint128::from(0u128);
+        let mut rank_reward = Uint128::from(0u128);
+        let mut token_rank = None;
+
+        if reward_contract.burn_type == "rank" {
+            let rank_entity: Option<Rank> = RANK_STORE.get(deps.storage, &token_id);
             //.ok_or_else(|| StdError::generic_err("Rank pool doesn't have token"))?;
-        if(rank.is_some()){
-        token_rank = rank;
-            if state.reward_contract.burn_rank_bonus_start.unwrap() > rank.unwrap() {
-                let reward = state.reward_contract.burn_rank_bonus_start.unwrap() - rank.unwrap();
-                rank_reward = Uint128::from(reward);
+            if rank_entity.is_some() {
+                token_rank = Some(rank_entity.as_ref().unwrap().rank);
+                rank_reward = rank_entity.unwrap().rank_reward;
             }
         }
-    }
 
-    if state.reward_contract.bonus_hourly > Uint128::from(0u128) {
-        if current_time > &state.burn_counter_date {
-            let duration_seconds = current_time - state.burn_counter_date;
-            let hours = duration_seconds / 3600;
-            bonus_reward = Uint128::from(hours) * state.reward_contract.bonus_hourly;
+        if reward_contract.bonus_hourly > Uint128::from(0u128) {
+            if current_time > &state.burn_counter_date {
+                let duration_seconds = current_time - state.burn_counter_date;
+                let hours = duration_seconds / 3600;
+                bonus_reward = Uint128::from(hours) * reward_contract.bonus_hourly;
+            }
         }
-    }
 
-    let expected_reward: ExpectedReward = {
-        ExpectedReward {
-            base_reward_expected: state.reward_contract.base_reward,
-            rank_reward_expected: rank_reward,
-            bonus_expected: bonus_reward,
-            total_expected: bonus_reward + rank_reward + state.reward_contract.base_reward,
-            rank: token_rank,
-            token_id: token_id.to_string(),
-        }
-    };
-    return Ok(expected_reward);
+        let expected_reward: ExpectedReward = {
+            ExpectedReward {
+                base_reward_expected: reward_contract.base_reward,
+                rank_reward_expected: rank_reward,
+                bonus_expected: bonus_reward,
+                total_expected: bonus_reward + rank_reward + reward_contract.base_reward,
+                rank: token_rank,
+                token_id: token_id.to_string(),
+                reward_contract_name: reward_contract.name.to_string(),
+            }
+        };
+
+        expected_rewards.push(expected_reward);
+    }
+    return Ok(expected_rewards);
 }
 fn get_estimated_rewards_mut(
     token_id: &String,
     current_time: &u64,
     state: &State,
     deps: &DepsMut,
-) -> StdResult<ExpectedReward> {
-    let mut bonus_reward = Uint128::from(0u128);
-    let mut rank_reward = Uint128::from(0u128);
-    let mut token_rank = None;
+) -> StdResult<Vec<ExpectedReward>> {
+    let mut expected_rewards: Vec<ExpectedReward> = Vec::new();
 
-   if state.reward_contract.burn_type == "rank" {
-        let rank: Option<Uint128> = RANK_STORE
-            .get(deps.storage, &token_id);
+    for reward_contract in state.reward_contracts.iter() {
+        let mut bonus_reward = Uint128::from(0u128);
+        let mut rank_reward = Uint128::from(0u128);
+        let mut token_rank = None;
+
+        if reward_contract.burn_type == "rank" {
+            let rank_entity: Option<Rank> = RANK_STORE.get(deps.storage, &token_id);
             //.ok_or_else(|| StdError::generic_err("Rank pool doesn't have token"))?;
-        if(rank.is_some()){
-        token_rank = rank;
-            if state.reward_contract.burn_rank_bonus_start.unwrap() > rank.unwrap() {
-                let reward = state.reward_contract.burn_rank_bonus_start.unwrap() - rank.unwrap();
-                rank_reward = Uint128::from(reward);
+            if rank_entity.is_some() {
+                token_rank = Some(rank_entity.as_ref().unwrap().rank);
+                rank_reward = rank_entity.unwrap().rank_reward;
             }
         }
-    }
 
-    if state.reward_contract.bonus_hourly > Uint128::from(0u128) {
-        if current_time > &state.burn_counter_date {
-            let duration_seconds = current_time - state.burn_counter_date;
-            let hours = duration_seconds / 3600;
-            bonus_reward = Uint128::from(hours) * state.reward_contract.bonus_hourly;
+        if reward_contract.bonus_hourly > Uint128::from(0u128) {
+            if current_time > &state.burn_counter_date {
+                let duration_seconds = current_time - state.burn_counter_date;
+                let hours = duration_seconds / 3600;
+                bonus_reward = Uint128::from(hours) * reward_contract.bonus_hourly;
+            }
         }
-    }
 
-    let expected_reward: ExpectedReward = {
-        ExpectedReward {
-            base_reward_expected: state.reward_contract.base_reward,
-            rank_reward_expected: rank_reward,
-            bonus_expected: bonus_reward,
-            total_expected: bonus_reward + rank_reward + state.reward_contract.base_reward,
-            rank: token_rank,
-            token_id: token_id.to_string(),
-        }
-    };
-    return Ok(expected_reward);
+        let expected_reward: ExpectedReward = {
+            ExpectedReward {
+                base_reward_expected: reward_contract.base_reward,
+                rank_reward_expected: rank_reward,
+                bonus_expected: bonus_reward,
+                total_expected: bonus_reward + rank_reward + reward_contract.base_reward,
+                rank: token_rank,
+                token_id: token_id.to_string(),
+                reward_contract_name: reward_contract.name.to_string(),
+            }
+        };
+        expected_rewards.push(expected_reward);
+    }
+    return Ok(expected_rewards);
 }
 //TODO: ADD QUERY FOR FULL HISTORY
 #[entry_point]
@@ -552,7 +609,7 @@ pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
         } => to_binary(&query_user_history(
             deps, _env, permit, start_page, page_size,
         )?),
-        QueryMsg::GetNumFullHistory { } => to_binary(&query_num_full_history(deps, _env)?),
+        QueryMsg::GetNumFullHistory {} => to_binary(&query_num_full_history(deps, _env)?),
         QueryMsg::GetFullHistory {
             start_page,
             page_size,
@@ -567,12 +624,11 @@ fn query_burn_info(deps: Deps) -> StdResult<BurnInfoResponse> {
     let state = CONFIG_ITEM.load(deps.storage)?;
     Ok(BurnInfoResponse {
         total_burned_amount: state.total_burned_amount,
-        total_rewards: state.total_rewards,
         nft_contract: state.nft_contract,
-        reward_contract: state.reward_contract,
+        reward_contracts: state.reward_contracts,
         trait_restriction: state.trait_restriction,
         is_active: state.is_active,
-        burn_counter_date: state.burn_counter_date
+        burn_counter_date: state.burn_counter_date,
     })
 }
 
@@ -583,7 +639,7 @@ fn query_expected_rewards(
 ) -> StdResult<ExpectedRewardResponse> {
     let state = CONFIG_ITEM.load(deps.storage)?;
     let current_time = env.block.time.seconds();
-    let mut estimated_rewards: Vec<ExpectedReward> = Vec::new();
+    let mut estimated_rewards: Vec<Vec<ExpectedReward>> = Vec::new();
     for token_id in token_ids.iter() {
         let response = get_estimated_rewards(&token_id, &current_time, &state, deps);
         estimated_rewards.push(response.unwrap());
@@ -629,18 +685,22 @@ fn query_full_history(
     Ok(history)
 }
 
-fn query_reward_balance(deps: Deps, env: Env, viewer: ViewerInfo) -> StdResult<Balance> {
+fn query_reward_balance(deps: Deps, env: Env, viewer: ViewerInfo) -> StdResult<Vec<Balance>> {
     check_admin_key(deps, viewer)?;
     let state = CONFIG_ITEM.load(deps.storage)?;
-    let balance = balance_query(
-        deps.querier,
-        env.contract.address.to_string(),
-        state.viewing_key.unwrap(),
-        BLOCK_SIZE,
-        state.reward_contract.code_hash,
-        state.reward_contract.address.to_string(),
-    );
-    Ok(balance.unwrap())
+    let mut balances: Vec<Balance> = Vec::new();
+    for reward_contract in state.reward_contracts.iter() {
+        let balance = balance_query(
+            deps.querier,
+            env.contract.address.to_string(),
+            state.viewing_key.clone().unwrap(),
+            BLOCK_SIZE,
+            reward_contract.code_hash.to_string(),
+            reward_contract.address.to_string(),
+        );
+        balances.push(balance.unwrap())
+    }
+    Ok(balances)
 }
 
 fn check_admin_key(deps: Deps, viewer: ViewerInfo) -> StdResult<()> {
@@ -681,18 +741,14 @@ fn get_querier(deps: Deps, permit: Permit, contract_address: Addr) -> StdResult<
 mod tests {
     use super::*;
     use crate::msg::ContractInfo;
+    use cosmwasm_std::testing::mock_dependencies;
 
     #[test]
     fn rewards_calc() {
-        //rounding issue makes 1369500000 > 1369499999
-        let mut expected = Uint128::from(13694999u128);
-        let mut staked: Staked = {
-            Staked {
-                staked_amount: Uint128::from(1u128),
-                last_claimed_date: None,
-                last_staked_date: Some(1686588696),
-            }
-        };
+        let mut deps = mock_dependencies();
+        
+        let mut expected = Uint128::from(650000000u128);
+        
         let current_time = 1686675096;
         let state: State = {
             State {
@@ -702,29 +758,37 @@ mod tests {
                     ContractInfo {
                         code_hash: "".to_string(),
                         address: Addr::unchecked(""),
-                        name: "".to_string(),
-                        stake_type: "".to_string(),
+                        name: "".to_string()
                     }
                 },
-                reward_contract: {
-                    RewardsContractInfo {
-                        code_hash: "".to_string(),
-                        address: Addr::unchecked(""),
-                        rewards_per_day: Uint128::from(2739000000u128),
-                        name: "".to_string(),
-                    }
-                },
+                reward_contracts: vec![RewardsContractInfo {
+                    code_hash: "".to_string(),
+                    address: Addr::unchecked(""),
+                    base_reward: Uint128::from(50000000u128),
+                    bonus_hourly: Uint128::from(25000000u128),
+                    name: "shill".to_string(),
+                    burn_type: "normal".to_string(),
+                    total_rewards: Uint128::from(10000000000000u128),
+                }],
                 viewing_key: None,
-                total_staked_amount: Uint128::from(200u128),
-                total_rewards: Uint128::from(10000000000000u128),
+                total_burned_amount: 200u32,
+                trait_restriction: None, 
+                burn_counter_date: 1686588696
             }
         };
-        let x = get_estimated_rewards(&staked, &current_time, &state);
-        assert_eq!(x.unwrap(), expected);
 
-        staked.staked_amount = Uint128::from(100u128);
-        expected = Uint128::from(1369499999u128);
-        let y = get_estimated_rewards(&staked, &current_time, &state);
-        assert_eq!(y.unwrap(), expected);
+        let x = get_estimated_rewards(&"1".to_string(), &current_time, &state, deps.as_ref());
+        println!("{:?}", x);
+        println!("{:?}", "HIII");
+        
+        for value in x.unwrap().iter() {
+            assert_eq!(value.total_expected, expected);
+        }
+        //TODO TEST RANK BASED REWARDS
+        
+        // staked.staked_amount = Uint128::from(100u128);
+        // expected = Uint128::from(1369499999u128);
+        // let y = get_estimated_rewards(&staked, &current_time, &state);
+        // assert_eq!(y.unwrap(), expected);
     }
 }

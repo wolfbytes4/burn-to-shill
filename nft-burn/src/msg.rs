@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 pub struct InstantiateMsg {
     pub entropy: String,
     pub nft_contract: ContractInfo,
-    pub reward_contract: RewardsContractInfo,
+    pub reward_contracts: Vec<RewardsContractInfo>,
     pub trait_restriction: Option<String>,
     pub ranks: Vec<Rank>,
 }
@@ -30,12 +30,13 @@ pub struct RewardsContractInfo {
     pub bonus_hourly: Uint128,
     pub name: String,
     pub burn_type: String,
-    pub burn_rank_bonus_start: Option<Uint128>,
+    pub total_rewards: Uint128,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 pub struct History {
     pub token_id: String,
+    pub message: String,
     pub date: u64,
     pub rewards: Uint128,
 }
@@ -43,6 +44,7 @@ pub struct History {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 pub struct HistoryFull {
     pub token_id: String,
+    pub message: String,
     pub date: u64,
     pub meta_data: Metadata,
 }
@@ -51,6 +53,7 @@ pub struct HistoryFull {
 pub struct Rank {
     pub token_id: String,
     pub rank: Uint128,
+    pub rank_reward: Uint128,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
@@ -71,7 +74,7 @@ pub enum ExecuteMsg {
         msg: Option<Binary>,
     },
     UpdateRewardContract {
-        contract: RewardsContractInfo,
+        contracts: Vec<RewardsContractInfo>,
     },
     RemoveRewards {},
     ResetBurnCounterDate {},
@@ -93,8 +96,8 @@ pub enum HandleReceiveMsg {
 #[serde(rename_all = "snake_case")]
 pub enum HandleNftReceiveMsg {
     ClaimBurnRewards {
-        base_reward_expected: Uint128,
-        bonus_expected: Uint128,
+        expected_rewards: Vec<ExpectedCheck>,
+        message: String,
     },
 }
 
@@ -127,8 +130,7 @@ pub enum QueryMsg {
 pub struct BurnInfoResponse {
     pub total_burned_amount: u32,
     pub nft_contract: ContractInfo,
-    pub reward_contract: RewardsContractInfo,
-    pub total_rewards: Uint128,
+    pub reward_contracts: Vec<RewardsContractInfo>,
     pub trait_restriction: Option<String>,
     pub is_active: bool,
     pub burn_counter_date: u64,
@@ -142,9 +144,23 @@ pub struct ExpectedReward {
     pub total_expected: Uint128,
     pub token_id: String,
     pub rank: Option<Uint128>,
+    pub reward_contract_name: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
+pub struct ExpectedCheck {
+    pub base_reward_expected: Uint128,
+    pub bonus_expected: Uint128,
+    pub reward_contract_name: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
+pub struct Reward {
+    pub base_reward: Uint128,
+    pub bonus_reward: Uint128,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 pub struct ExpectedRewardResponse {
-    pub expected_rewards: Vec<ExpectedReward>,
+    pub expected_rewards: Vec<Vec<ExpectedReward>>,
 }
