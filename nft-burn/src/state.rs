@@ -2,7 +2,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::msg::{ContractInfo, History, HistoryFull, Rank, RewardsContractInfo};
-use cosmwasm_std::{Addr, Uint128};
+use cosmwasm_std::{Addr};
 use secret_toolkit::{
     snip721::ViewerInfo,
     storage::{AppendStore, Item, Keymap},

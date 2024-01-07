@@ -2,10 +2,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::msg::ContractInfo;
-use cosmwasm_std::{Addr, CanonicalAddr, Uint128};
-use secret_toolkit::{
-    snip721::ViewerInfo,
-    storage::{AppendStore, Item, Keymap},
+use cosmwasm_std::{Addr};
+use secret_toolkit::{ 
+    storage::{Item},
 };
 
 pub static CONFIG_KEY: &[u8] = b"config";

@@ -1,4 +1,4 @@
-use cosmwasm_std::{Addr, Binary, Uint128};
+use cosmwasm_std::{Addr, Uint128};
 use schemars::JsonSchema;
 use secret_toolkit::utils::Query;
 use serde::{Deserialize, Serialize};
@@ -22,7 +22,7 @@ pub struct RewardsContractInfo {
     pub bonus_hourly: Uint128,
     pub name: String,
     pub burn_type: String,
-    pub burn_rank_bonus_start: Option<Uint128>,
+    pub total_rewards: Uint128,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
@@ -50,8 +50,7 @@ pub struct ContractsWithInfoResponse {
 pub struct BurnInfoResponse {
     pub total_burned_amount: u32,
     pub nft_contract: ContractInfo,
-    pub reward_contract: RewardsContractInfo,
-    pub total_rewards: Uint128,
+    pub reward_contracts: Vec<RewardsContractInfo>,
     pub trait_restriction: Option<String>,
     pub is_active: bool,
     pub burn_counter_date: u64,

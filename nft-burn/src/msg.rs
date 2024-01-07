@@ -52,8 +52,8 @@ pub struct HistoryFull {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 pub struct Rank {
     pub token_id: String,
-    pub rank: Uint128,
-    pub rank_reward: Uint128,
+    pub rank: u32,
+    pub rank_rewards: Vec<RankReward>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
@@ -75,6 +75,9 @@ pub enum ExecuteMsg {
     },
     UpdateRewardContract {
         contracts: Vec<RewardsContractInfo>,
+    },
+    UpdateRanks {
+        ranks: Vec<Rank>,
     },
     RemoveRewards {},
     ResetBurnCounterDate {},
@@ -143,7 +146,7 @@ pub struct ExpectedReward {
     pub bonus_expected: Uint128,
     pub total_expected: Uint128,
     pub token_id: String,
-    pub rank: Option<Uint128>,
+    pub rank: Option<u32>,
     pub reward_contract_name: String,
 }
 
@@ -158,6 +161,12 @@ pub struct ExpectedCheck {
 pub struct Reward {
     pub base_reward: Uint128,
     pub bonus_reward: Uint128,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
+pub struct RankReward {
+    pub rank_reward: Uint128,
+    pub reward_contract_name: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]

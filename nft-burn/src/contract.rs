@@ -10,7 +10,7 @@ use crate::state::{
     PREFIX_REVOKED_PERMITS, RANK_STORE,
 };
 use cosmwasm_std::{
-    entry_point, from_binary, to_binary, Addr, Binary, CanonicalAddr, CosmosMsg, Decimal, Deps,
+    entry_point, from_binary, to_binary, Addr, Binary, CanonicalAddr, CosmosMsg, Deps,
     DepsMut, Env, MessageInfo, Response, StdError, StdResult, Uint128,
 };
 use secret_toolkit::{
@@ -104,6 +104,10 @@ pub fn execute(
         }
         ExecuteMsg::UpdateRewardContract { contracts } => {
             try_update_reward_contract(deps, &info.sender, contracts)
+        }
+
+        ExecuteMsg::UpdateRanks { ranks } => {
+            try_update_ranks(deps, &info.sender, ranks)
         }
         ExecuteMsg::RemoveRewards {} => try_remove_rewards(deps, &info.sender),
         ExecuteMsg::BatchReceiveNft {
@@ -199,7 +203,7 @@ fn try_batch_receive(
                 let current_time = _env.block.time.seconds();
                 let mut rewards_map = std::collections::HashMap::new();
                 for reward_contract in state.reward_contracts.iter() {
-                    let mut reward = {
+                    let reward = {
                         Reward {
                             base_reward: Uint128::from(0u128),
                             bonus_reward: Uint128::from(0u128),
@@ -287,7 +291,7 @@ fn try_batch_receive(
                             let rewards_to_claim = value.base_reward + value.bonus_reward;
                             let reward_contract_index =
                                 state.reward_contracts.iter().position(|x| {
-                                    x.address == expected_reward.reward_contract_name.to_string()
+                                    x.name == expected_reward.reward_contract_name.to_string()
                                 });
                             let reward_contract =
                                 &mut state.reward_contracts[reward_contract_index.unwrap()];
@@ -384,13 +388,15 @@ fn try_update_reward_contract(
         });
     }
 
-    for reward_contract in contracts.iter() {
+    for reward_contract in state.reward_contracts.iter() {
         if reward_contract.total_rewards != Uint128::from(0u128) {
             return Err(ContractError::CustomError {
                 val: "Clear out rewards first before updating".to_string(),
             });
         }
+    }
 
+    for reward_contract in contracts.iter() {
         response_msgs.push(set_viewing_key_msg(
             state.viewing_key.clone().unwrap().to_string(),
             None,
@@ -404,6 +410,27 @@ fn try_update_reward_contract(
     CONFIG_ITEM.save(deps.storage, &state)?;
 
     Ok(Response::new().add_messages(response_msgs))
+}
+
+fn try_update_ranks(
+    deps: DepsMut,
+    sender: &Addr,
+    ranks: Vec<Rank>,
+) -> Result<Response, ContractError> {
+    let state = CONFIG_ITEM.load(deps.storage)?;
+    let mut response_msgs: Vec<CosmosMsg> = Vec::new();
+
+    if sender.clone() != state.owner {
+        return Err(ContractError::CustomError {
+            val: "You don't have the permissions to execute this command".to_string(),
+        });
+    }
+
+    for rank in ranks.iter() {
+        RANK_STORE.insert(deps.storage, &rank.token_id, &rank)?;
+    } 
+ 
+    Ok(Response::default())
 }
 
 fn try_remove_rewards(deps: DepsMut, sender: &Addr) -> Result<Response, ContractError> {
@@ -518,7 +545,15 @@ fn get_estimated_rewards(
             //.ok_or_else(|| StdError::generic_err("Rank pool doesn't have token"))?;
             if rank_entity.is_some() {
                 token_rank = Some(rank_entity.as_ref().unwrap().rank);
-                rank_reward = rank_entity.unwrap().rank_reward;
+                let r_reward = rank_entity
+                    .as_ref()
+                    .unwrap()
+                    .rank_rewards
+                    .iter()
+                    .find(|&x| x.reward_contract_name == reward_contract.name);
+                if r_reward.is_some() {
+                    rank_reward = r_reward.unwrap().rank_reward;
+                }
             }
         }
 
@@ -564,7 +599,15 @@ fn get_estimated_rewards_mut(
             //.ok_or_else(|| StdError::generic_err("Rank pool doesn't have token"))?;
             if rank_entity.is_some() {
                 token_rank = Some(rank_entity.as_ref().unwrap().rank);
-                rank_reward = rank_entity.unwrap().rank_reward;
+                let r_reward = rank_entity
+                    .as_ref()
+                    .unwrap()
+                    .rank_rewards
+                    .iter()
+                    .find(|&x| x.reward_contract_name == reward_contract.name);
+                if r_reward.is_some() {
+                    rank_reward = r_reward.unwrap().rank_reward;
+                }
             }
         }
 
@@ -746,9 +789,9 @@ mod tests {
     #[test]
     fn rewards_calc() {
         let mut deps = mock_dependencies();
-        
+
         let mut expected = Uint128::from(650000000u128);
-        
+
         let current_time = 1686675096;
         let state: State = {
             State {
@@ -758,7 +801,7 @@ mod tests {
                     ContractInfo {
                         code_hash: "".to_string(),
                         address: Addr::unchecked(""),
-                        name: "".to_string()
+                        name: "".to_string(),
                     }
                 },
                 reward_contracts: vec![RewardsContractInfo {
@@ -772,20 +815,20 @@ mod tests {
                 }],
                 viewing_key: None,
                 total_burned_amount: 200u32,
-                trait_restriction: None, 
-                burn_counter_date: 1686588696
+                trait_restriction: None,
+                burn_counter_date: 1686588696,
             }
         };
 
         let x = get_estimated_rewards(&"1".to_string(), &current_time, &state, deps.as_ref());
         println!("{:?}", x);
         println!("{:?}", "HIII");
-        
+
         for value in x.unwrap().iter() {
             assert_eq!(value.total_expected, expected);
         }
         //TODO TEST RANK BASED REWARDS
-        
+
         // staked.staked_amount = Uint128::from(100u128);
         // expected = Uint128::from(1369499999u128);
         // let y = get_estimated_rewards(&staked, &current_time, &state);

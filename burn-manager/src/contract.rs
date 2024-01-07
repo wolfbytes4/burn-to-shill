@@ -1,12 +1,12 @@
 use crate::error::ContractError;
 use crate::msg::{
     BurnInfoQueryMsg, BurnInfoResponse, ContractInfo, ContractsWithInfoResponse, ExecuteMsg,
-    InstantiateMsg, QueryMsg, RewardsContractInfo,
+    InstantiateMsg, QueryMsg,
 };
 use crate::state::{State, CONFIG_ITEM};
 use cosmwasm_std::{
-    entry_point, from_binary, to_binary, Addr, Binary, CanonicalAddr, CosmosMsg, Deps, DepsMut,
-    Env, MessageInfo, Response, StdError, StdResult, Uint128,
+    entry_point, to_binary, Addr, Binary, Deps, DepsMut,
+    Env, MessageInfo, Response, StdError, StdResult,
 };
 use secret_toolkit::utils::Query;
 
